@@ -44,10 +44,12 @@ include("StatusCodes.jl")              ;using .StatusCodes
 include("Messages.jl")                 ;using .Messages
 include("cookies.jl")                  ;using .Cookies
 include("Streams.jl")                  ;using .Streams
+include("HTTP2.jl")
 include("SSE.jl")                      ;using .SSE
 
 getrequest(r::Request) = r
 getrequest(s::Stream) = s.message.request
+getrequest(s::HTTP2.H2Stream) = s.message.request
 
 # Wraps client-side "layer" to track the amount of time spent in it as a request is processed.
 function observelayer(f)

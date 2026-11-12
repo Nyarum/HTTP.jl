@@ -4,6 +4,7 @@ using ..IOExtras, ..Messages, ..Streams, ..Connections, ..Strings, ..RedirectReq
 using CodecZlib, URIs
 using SimpleBufferStream: BufferStream
 using ConcurrentUtilities: @samethreadpool_spawn
+using ..HTTP2: H2Stream
 
 export streamlayer
 
@@ -206,5 +207,7 @@ function readbody!(stream::Stream, res::Response, buf_or_stream, lock)
         res.request.context[:nbytes] = n
     end
 end
+
+include("HTTP2Request.jl")
 
 end # module StreamRequest

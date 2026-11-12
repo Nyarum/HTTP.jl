@@ -5,6 +5,7 @@ import MbedTLS
 import OpenSSL
 using ..Messages, ..IOExtras, ..Connections, ..Streams, ..Exceptions
 import ..SOCKET_TYPE_TLS
+import ..HTTP2
 
 islocalhost(host::AbstractString) = host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0000:0000:0000:0000:0000:0000:0000:0001" || host == "0:0:0:0:0:0:0:1"
 
@@ -58,6 +59,12 @@ Otherwise leave it open so that it can be reused.
 """
 function connectionlayer(handler)
     return function connections(req; proxy=getproxy(req.url.scheme, req.url.host), socket_type::Type=TCPSocket, socket_type_tls::Union{Nothing, Type}=nothing, readtimeout::Int=0, connect_timeout::Int=30, logerrors::Bool=false, logtag=nothing, closeimmediately::Bool=CLOSE_IMMEDIATELY[], kw...)
+        if req.version == v"2.0"
+            return HTTP2.connection(handler, req; proxy, socket_type, socket_type_tls,
+                readtimeout, connect_timeout, logerrors, logtag, kw...)
+        elseif req.version.major >= 2
+            throw(ArgumentError("Unsupported HTTP version"))
+        end
         local io, stream
         if proxy !== nothing
             target_url = req.url

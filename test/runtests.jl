@@ -18,6 +18,7 @@ isok(r) = r.status == 200
         "client.jl",
         "connection_reuse.jl",
         "sse.jl",
+        "http2.jl",
         # "download.jl",
         "multipart.jl",
         "parsemultipart.jl",

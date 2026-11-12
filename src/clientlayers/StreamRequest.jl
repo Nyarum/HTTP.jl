@@ -26,6 +26,17 @@ function streamlayer(stream::Stream; iofunction=nothing, decompress::Union{Nothi
         throw(ArgumentError("`sse_callback` cannot be combined with `response_stream` or a custom `iofunction`"))
     end
     @debug sprintcompact(req)
+    # Nonblocking best-effort check, not a guarantee of future liveness. Never
+    # probe with a request or call eof here (it can wait forever on a live peer).
+    # Once startwrite begins, even a partial header write forbids a POST replay.
+    if get(req.context, :connection_reused, false)
+        if !isopen(stream) || (Connections.has_tcpsocket(stream.stream) &&
+                              !isopen(tcpsocket(stream.stream)))
+            throw(Exceptions.StaleConnectionError(:closed))
+        elseif bytesavailable(stream.stream) > 0
+            throw(Exceptions.StaleConnectionError(:unsolicited_data))
+        end
+    end
     @debug "client startwrite"
     write_start = time()
     startwrite(stream)

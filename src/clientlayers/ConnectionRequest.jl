@@ -77,9 +77,17 @@ function connectionlayer(handler)
 
         connect_timeout = connect_timeout == 0 && readtimeout > 0 ? readtimeout : connect_timeout
         IOType = sockettype(url, socket_type, socket_type_tls, get(kw, :sslconfig, nothing))
+        # Reset on every transport attempt; never inherit a previous attempt's
+        # nothingwritten/reuse flags through the retry or redirect layers.
+        req.context[:nothingwritten] = false
+        req.context[:request_write_started] = false
+        req.context[:connection_reused] = false
+        reused = Ref(false)
         start_time = time()
         try
-            io = newconnection(IOType, url.host, url.port; readtimeout=readtimeout, connect_timeout=connect_timeout, kw...)
+            io = newconnection(IOType, url.host, url.port; readtimeout=readtimeout, connect_timeout=connect_timeout,
+                               connection_reused=reused, kw...)
+            req.context[:connection_reused] = reused[]
         catch e
             if logerrors
                 @error current_exceptions_to_string() type=Symbol("HTTP.ConnectError") method=req.method url=req.url context=req.context logtag=logtag
@@ -114,6 +122,7 @@ function connectionlayer(handler)
                 if target_url.scheme in ("https", "wss")
                     InnerIOType = sockettype(target_url, socket_type, socket_type_tls, get(kw, :sslconfig, nothing))
                     io = Connections.sslupgrade(InnerIOType, io, target_url.host; readtimeout=readtimeout, kw...)
+                    req.context[:connection_reused] = false
                 end
                 req.headers = filter(x -> !Messages.field_name_isequal(x.first, "Proxy-Authorization"), req.headers)
             end
@@ -135,9 +144,9 @@ function connectionlayer(handler)
                 @error current_exceptions_to_string() type=Symbol("HTTP.ConnectionRequest") method=req.method url=req.url context=req.context logtag=logtag
             end
             @debug "❗️  ConnectionLayer $root_err. Closing: $io"
-            if @isdefined(stream) && stream.nwritten == -1
-                # we didn't write anything, so don't need to worry about
-                # idempotency of the request
+            if @isdefined(stream) && !get(req.context, :request_write_started, true)
+                # Checked before the first header write, not via the body-byte
+                # counter (which stays -1 after a partial header write).
                 req.context[:nothingwritten] = true
             end
             root_err isa HTTPError || throw(RequestError(req, root_err))

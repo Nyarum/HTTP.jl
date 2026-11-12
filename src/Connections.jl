@@ -94,6 +94,8 @@ mutable struct Connection{IO_t <: IO} <: IO
     writable::Bool
     writebuffer::IOBuffer
     state::Any # populated & used by Servers code
+    reuse_lock::ReentrantLock
+    reuse_generation::UInt
 end
 
 has_tcpsocket(c::Connection) = applicable(tcpsocket, c.io)
@@ -118,7 +120,8 @@ Connection(host::AbstractString, port::AbstractString,
     Connection{T}(host, port, idle_timeout,
                 require_ssl_verification, keepalive,
                 safe_getpeername(io)..., localport(io),
-                io, client, PipeBuffer(), time(), false, false, IOBuffer(), nothing)
+                io, client, PipeBuffer(), time(), false, false, IOBuffer(), nothing,
+                ReentrantLock(), UInt(0))
 
 Connection(io; require_ssl_verification::Bool=true, keepalive::Bool=true) =
     Connection("", "", 0, require_ssl_verification, keepalive, io, false)
@@ -248,8 +251,11 @@ end
     startwrite(::Connection)
 """
 function IOExtras.startwrite(c::Connection)
-    @require !iswritable(c)
-    c.writable = true
+    Base.@lock c.reuse_lock begin
+        @require !iswritable(c)
+        c.reuse_generation += UInt(1)
+        c.writable = true
+    end
     @debug "👁  Start write:$c"
     return
 end
@@ -280,17 +286,22 @@ end
 
 """
 Wait for `c` to receive data or reach EOF.
-Close `c` on EOF.
-TODO: or if response data arrives when no request was sent (isreadable == false).
+Close `c` on EOF, or on unsolicited data while this idle generation still owns
+the connection (RFC 9112, section 9.2). A late monitor must not close a connection
+that has already been checked out for another request.
 """
-function monitor_idle_connection(c::Connection)
+function monitor_idle_connection(c::Connection, generation::UInt=c.reuse_generation)
     try
-        if eof(c.io)                                  ;@debug "💀  Closed:     $c"
-            close(c.io)
+        ended = eof(c.io)
+        Base.@lock c.reuse_lock begin
+            if ended || (c.reuse_generation == generation && !isreadable(c) && !iswritable(c))
+                @debug "💀  Closed idle connection: $c"
+                close(c.io)
+            end
         end
     catch ex
         @try Base.IOError close(c.io)
-        ex isa Base.IOError || rethrow()
+        ex isa Union{Base.IOError, EOFError} || rethrow()
     end
     nothing
 end
@@ -302,10 +313,13 @@ Signal that an entire Response Message has been read from the `Connection`.
 """
 function IOExtras.closeread(c::Connection)
     @require isreadable(c)
-    c.readable = false
+    generation = Base.@lock c.reuse_lock begin
+        c.readable = false
+        c.reuse_generation += UInt(1)
+    end
     @debug "✉️  Read done: $c"
     if c.clientconnection
-        t = Threads.@spawn monitor_idle_connection(c)
+        t = Threads.@spawn monitor_idle_connection(c, generation)
         @isdefined(errormonitor) && errormonitor(t)
     end
     return
@@ -424,9 +438,18 @@ function closeall(pool::Union{Nothing, Pool}=nothing)
 end
 
 function connection_isvalid(c, idle_timeout)
-    check = isopen(c) && inactiveseconds(c) <= idle_timeout
-    check || close(c)
-    return check
+    Base.@lock c.reuse_lock begin
+        check = isopen(c) && inactiveseconds(c) <= idle_timeout && bytesavailable(c) == 0
+        if has_tcpsocket(c)
+            check &= isopen(tcpsocket(c))
+        end
+        if check
+            c.reuse_generation += UInt(1) # invalidate the previous idle monitor
+        else
+            close(c)
+        end
+        return check
+    end
 end
 
 @noinline connection_limit_warning(cl) = cl === nothing ||
@@ -447,16 +470,19 @@ function newconnection(::Type{T},
                        connection_limit=nothing,
                        forcenew::Bool=false,
                        idle_timeout=typemax(Int),
+                       connection_reused::Union{Nothing,Ref{Bool}}=nothing,
                        connect_timeout::Int=DEFAULT_CONNECT_TIMEOUT[],
                        require_ssl_verification::Bool=NetworkOptions.verify_host(host, "SSL"),
                        keepalive::Bool=true,
                        kw...) where {T <: IO}
     connection_limit_warning(connection_limit)
-    return acquire(
+    created = false
+    conn = acquire(
             getpool(pool, T),
             (host, port, require_ssl_verification, keepalive, true);
             forcenew=forcenew,
             isvalid=c->connection_isvalid(c, Int(idle_timeout))) do
+                created = true
                 Connection(host, port,
                     idle_timeout, require_ssl_verification, keepalive,
                     connect_timeout > 0 ?
@@ -468,6 +494,8 @@ function newconnection(::Type{T},
                             require_ssl_verification=require_ssl_verification, keepalive=keepalive, kw...)
             )
     end
+    connection_reused === nothing || (connection_reused[] = !created)
+    return conn
 end
 
 function releaseconnection(c::Connection{T}, reuse; pool::Union{Nothing, Pool}=nothing, kw...) where {T}

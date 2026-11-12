@@ -77,6 +77,7 @@ function retrylayer(handler)
 end
 
 isrecoverable(ex) = is_wrapped_exception(ex) ? isrecoverable(unwrap_exception(ex)) : false
+isrecoverable(::Exceptions.StaleConnectionError) = true
 isrecoverable(::Union{Base.EOFError, Base.IOError, MbedTLS.MbedException, OpenSSL.OpenSSLError}) = true
 isrecoverable(ex::ArgumentError) = ex.msg == "stream is closed or unusable"
 isrecoverable(ex::CompositeException) = all(isrecoverable, ex.exceptions)

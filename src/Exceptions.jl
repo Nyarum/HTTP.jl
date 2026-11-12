@@ -27,6 +27,15 @@ end # @eval
 
 abstract type HTTPError <: Exception end
 
+# Raised only by the pre-write check on a pooled connection. Unlike EOF/IOError
+# during a write, this proves that no bytes of this request were sent.
+struct StaleConnectionError <: HTTPError
+    reason::Symbol
+end
+
+Base.showerror(io::IO, e::StaleConnectionError) =
+    print(io, "HTTP.StaleConnectionError before request write: ", e.reason)
+
 """
     HTTP.ConnectError
 

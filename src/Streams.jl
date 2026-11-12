@@ -82,8 +82,13 @@ function IOExtras.startwrite(http::Stream)
     else
         http.writechunked = ischunked(m)
     end
+    # Mark BEFORE writeheaders: it can write a prefix and then throw. The
+    # body counter remains -1 in that case and is not proof of an unsent request.
+    if m isa Request
+        m.context[:request_write_started] = true
+    end
     n = writeheaders(http.stream, m)
-    # nwritten starts at -1 so that we can tell if we've written anything yet
+    # nwritten counts body bytes only, not partially written headers.
     http.nwritten = 0 # should not include headers
     return n
 end
